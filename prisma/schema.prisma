@@ -1,0 +1,606 @@
+// ============================================================
+// awarefit_crm — schema.prisma  (Final v2.0 — SQLite 호환)
+// Enum → String (SQLite 제약으로 인해 String으로 표현)
+// Enum 값 검증은 Zod 스키마 레이어에서 수행
+// ============================================================
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================================
+// SECTION 1 ─ 센터 설정 (Center & Config)
+// ============================================================
+
+/// 다점포 확장을 고려한 센터 마스터 테이블
+model Center {
+  id       Int     @id @default(autoincrement())
+  name     String
+  phone    String?
+  address  String?
+  timezone String  @default("Asia/Seoul")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  configs  CenterConfig[]
+  staffs   Staff[]
+  members  Member[]
+  holidays Holiday[]
+}
+
+/// 센터별 운영 설정 (Key-Value 방식으로 유연하게)
+model CenterConfig {
+  id       Int    @id @default(autoincrement())
+  centerId Int
+  center   Center @relation(fields: [centerId], references: [id], onDelete: Cascade)
+
+  key   String // e.g. "OPEN_TIME", "CLOSE_TIME", "EXPIRY_ALERT_DAYS"
+  value String
+  memo  String?
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([centerId, key])
+}
+
+/// 공휴일·휴무일 관리 (예약 가능 여부 체크에 활용)
+model Holiday {
+  id       Int    @id @default(autoincrement())
+  centerId Int
+  center   Center @relation(fields: [centerId], references: [id], onDelete: Cascade)
+
+  date     DateTime
+  name     String?
+  isAllDay Boolean  @default(true)
+
+  @@unique([centerId, date])
+}
+
+// ============================================================
+// SECTION 2 ─ 회원 (Member & Profiles)
+// ============================================================
+
+model Member {
+  id       Int    @id @default(autoincrement())
+  centerId Int
+  center   Center @relation(fields: [centerId], references: [id], onDelete: Restrict)
+
+  name   String
+  phone  String
+  email  String?
+  gender String?
+  birth  DateTime?
+  /// MemberStatus: ACTIVE | STOP | EXPIRED | DELETED
+  status String    @default("ACTIVE")
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // ── Relations ──────────────────────────────────────────
+  healthProfile     HealthProfile?
+  insight           MemberInsight?
+  subscriptions     Subscription[]
+  workoutLogs       WorkoutLog[]
+  interactions      Interaction[]
+  measurements      Measurement[]
+  goals             Goal[]
+  notifications     Notification[]
+  transfersGiven    TransferLog[]  @relation("TransferLogFromMember")
+  transfersReceived TransferLog[]  @relation("TransferLogToMember")
+
+  @@unique([centerId, phone])
+  @@index([centerId, status])
+  @@index([deletedAt])
+}
+
+/// 정적 건강 프로필 (부상·수술 이력, 최초 목표 등)
+model HealthProfile {
+  memberId Int    @id
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  injuries  String? // 부상 이력
+  surgeries String? // 수술 이력
+  goal      String? // 초기 상담 목표
+  caution   String? // 트레이너용 주의사항
+
+  updatedAt DateTime @updatedAt
+}
+
+// ============================================================
+// SECTION 3 ─ 측정 · 목표 (Measurement & Goal)
+// ============================================================
+
+/// 체중·인바디·둘레 등 모든 신체 측정 통합 관리
+model Measurement {
+  id       Int    @id @default(autoincrement())
+  memberId Int
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  /// MeasurementType: WEIGHT | INBODY | CIRCUMFERENCE | CUSTOM
+  type       String
+  measuredAt DateTime @default(now())
+
+  // 체중 / 기본 체성분
+  weight     Float? // kg
+  bodyFat    Float? // %
+  muscleMass Float? // kg
+  bmi        Float?
+
+  // 인바디 세부 (선택적)
+  visceralFat    Int?
+  basalMetabolic Int? // kcal
+  bodyWater      Float? // kg
+
+  // 부위별 둘레 (cm)
+  chest Float?
+  waist Float?
+  hip   Float?
+  thigh Float?
+  arm   Float?
+
+  // 기타 사용자 정의 측정값
+  customKey String?
+  customVal Float?
+
+  memo      String?
+  createdAt DateTime @default(now())
+
+  @@index([memberId, measuredAt])
+}
+
+/// 회원 목표 관리 (단기·장기 목표 모두 수용)
+model Goal {
+  id       Int    @id @default(autoincrement())
+  memberId Int
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  title       String // e.g. "체지방 5kg 감량"
+  targetValue Float? // 목표 수치 (있는 경우)
+  targetUnit  String? // e.g. "kg", "%", "회"
+  targetDate  DateTime?
+  /// GoalStatus: IN_PROGRESS | ACHIEVED | PAUSED | CANCELLED
+  status      String    @default("IN_PROGRESS")
+
+  achievedAt DateTime?
+  memo       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([memberId, status])
+}
+
+// ============================================================
+// SECTION 4 ─ 리텐션 인사이트 (MemberInsight)
+// ============================================================
+
+/// OLTP와 분리된 AI 분석 전용 테이블 — 배치 또는 이벤트 후 갱신
+model MemberInsight {
+  memberId Int    @id
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  // 0–100 점수 체계
+  attendanceScore Float @default(100.0) // 출석 일관성
+  sentimentScore  Float @default(100.0) // 상담·대화 감성
+  progressScore   Float @default(100.0) // 목표 달성 진척도
+  retentionIndex  Float @default(100.0) // 종합 유지 지수
+  churnRiskScore  Float @default(0.0) // 이탈 위험도 (높을수록 위험)
+
+  lastCalculated DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+// ============================================================
+// SECTION 5 ─ 직원 (Staff)
+// ============================================================
+
+model Staff {
+  id       Int    @id @default(autoincrement())
+  centerId Int
+  center   Center @relation(fields: [centerId], references: [id], onDelete: Restrict)
+
+  name         String
+  /// StaffRole: TRAINER | MANAGER | ADMIN
+  role         String
+  phone        String?
+  email        String?
+  baseSalary   Int     @default(0)
+  isFreelancer Boolean @default(true)
+
+  hireDate        DateTime?
+  resignationDate DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // ── Relations ──────────────────────────────────────────
+  commissionRules CommissionRule[]
+  subscriptions   Subscription[]
+  appointments    Appointment[]
+  attendances     Attendance[]
+  workoutLogs     WorkoutLog[]
+  payrolls        Payroll[]
+  severanceLedger SeveranceLedger?
+
+  @@unique([centerId, email])
+  @@index([centerId, role])
+}
+
+// ============================================================
+// SECTION 6 ─ 상품 · 구독 · 결제 (Product / Subscription / Payment)
+// ============================================================
+
+model Product {
+  id       Int    @id @default(autoincrement())
+  name     String
+  /// ProductCategory: PT | MEMBERSHIP | PILATES | ETC
+  category String @default("PT")
+  price    Int
+
+  /// -1 = 무제한 횟수 (기간제 멤버십)
+  sessionCnt Int
+  /// 0 = 기간 제한 없음
+  validDays  Int
+
+  isActive  Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id        Int @id @default(autoincrement())
+  memberId  Int
+  productId Int
+  staffId   Int
+
+  member  Member  @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  staff   Staff   @relation(fields: [staffId], references: [id], onDelete: Restrict)
+
+  totalCnt     Int
+  /// -1 = 무제한 (Product.sessionCnt == -1 인 경우 동기화)
+  remainingCnt Int
+  startDate    DateTime @default(now())
+  endDate      DateTime
+  /// SubscriptionStatus: ACTIVE | PAUSED | EXPIRED | CANCELLED | TRANSFERRED
+  status       String   @default("ACTIVE")
+
+  originalPrice  Int     @default(0)
+  discountAmount Int     @default(0)
+  autoRenew      Boolean @default(false)
+  notes          String?
+
+  // ── 수강권 양도 족보 ──────────────────────────────────
+  transferredFromId Int?
+  transferredFrom   Subscription?  @relation("SubTransferLineage", fields: [transferredFromId], references: [id], onDelete: SetNull)
+  transferredTo     Subscription[] @relation("SubTransferLineage")
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // ── Relations ──────────────────────────────────────────
+  payments        Payment[]
+  appointments    Appointment[]
+  attendances     Attendance[]
+  transfersAsFrom TransferLog[] @relation("TransferLogFromSub")
+  transfersAsTo   TransferLog[] @relation("TransferLogToSub")
+
+  @@index([memberId, status, deletedAt])
+  @@index([staffId, startDate])
+  @@index([endDate, status]) // 만료 임박 쿼리용
+  @@index([deletedAt])
+}
+
+model Payment {
+  id           Int          @id @default(autoincrement())
+  subId        Int
+  subscription Subscription @relation(fields: [subId], references: [id], onDelete: Restrict)
+
+  amount Int
+  /// PaymentMethod: CARD | CASH | TRANSFER | ACCOUNT
+  method String
+  paidAt DateTime @default(now())
+
+  isRefunded   Boolean   @default(false)
+  refundAmount Int       @default(0)
+  refundReason String?
+  refundedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([subId, paidAt])
+}
+
+// ============================================================
+// SECTION 7 ─ 양도 (TransferLog)
+// ============================================================
+
+model TransferLog {
+  id           Int @id @default(autoincrement())
+  fromMemberId Int
+  toMemberId   Int
+  fromSubId    Int
+  toSubId      Int
+
+  transferFee   Int      @default(0)
+  reason        String?
+  transferredAt DateTime @default(now())
+
+  fromMember       Member       @relation("TransferLogFromMember", fields: [fromMemberId], references: [id], onDelete: Restrict)
+  toMember         Member       @relation("TransferLogToMember", fields: [toMemberId], references: [id], onDelete: Restrict)
+  fromSubscription Subscription @relation("TransferLogFromSub", fields: [fromSubId], references: [id], onDelete: Restrict)
+  toSubscription   Subscription @relation("TransferLogToSub", fields: [toSubId], references: [id], onDelete: Restrict)
+}
+
+// ============================================================
+// SECTION 8 ─ 예약 · 출석 (Appointment / Attendance)
+// ============================================================
+
+model Appointment {
+  id      Int @id @default(autoincrement())
+  subId   Int
+  staffId Int
+
+  subscription Subscription @relation(fields: [subId], references: [id], onDelete: Restrict)
+  staff        Staff        @relation(fields: [staffId], references: [id], onDelete: Restrict)
+
+  startTime DateTime
+  endTime   DateTime
+  /// ApptStatus: SCHEDULED | COMPLETED | CANCELLED | NOSHOW
+  status    String   @default("SCHEDULED")
+  notes     String?
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  /// 예약 → 출석으로 전환될 때 1:1 매핑
+  attendance Attendance?
+
+  @@index([staffId, startTime])
+  @@index([subId, status])
+}
+
+/// 출석은 불변 사실(Immutable Fact) — 절대 수정하지 않고 보정 레코드를 추가
+model Attendance {
+  id      Int  @id @default(autoincrement())
+  subId   Int
+  staffId Int
+  /// null = 예약 없이 직접 체크인
+  apptId  Int? @unique
+
+  subscription Subscription @relation(fields: [subId], references: [id], onDelete: Restrict)
+  staff        Staff        @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  appointment  Appointment? @relation(fields: [apptId], references: [id], onDelete: SetNull)
+
+  checkedAt     DateTime @default(now())
+  commValue     Int      @default(0) // 해당 회차 커미션 산정값 스냅샷
+  sessionNumber Int? // 몇 번째 회차인지 (1-based)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([subId, checkedAt])
+  @@index([staffId, checkedAt])
+}
+
+// ============================================================
+// SECTION 9 ─ 운동 기록 (Exercise / WorkoutLog / WorkoutSet)
+// ============================================================
+
+/// 운동 종목 마스터 (센터 공용 or 트레이너 커스텀)
+model Exercise {
+  id         Int     @id @default(autoincrement())
+  name       String  @unique
+  targetArea String? // CHEST | BACK | LEGS | SHOULDER | CORE | CARDIO …
+  isActive   Boolean @default(true)
+
+  workoutLogs WorkoutLog[]
+}
+
+model WorkoutLog {
+  id         Int @id @default(autoincrement())
+  memberId   Int
+  staffId    Int
+  exerciseId Int
+
+  member   Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  staff    Staff    @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  exercise Exercise @relation(fields: [exerciseId], references: [id], onDelete: Restrict)
+
+  /// 회원 컨디션 체크 (1 매우 나쁨 ~ 5 매우 좋음)
+  conditionScore Int     @default(3)
+  memo           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sets WorkoutSet[]
+
+  @@index([memberId, createdAt])
+}
+
+/// 정규화된 세트 테이블
+model WorkoutSet {
+  id           Int        @id @default(autoincrement())
+  workoutLogId Int
+  workoutLog   WorkoutLog @relation(fields: [workoutLogId], references: [id], onDelete: Cascade)
+
+  setNo   Int // 1-based 세트 번호
+  weight  Float? // kg (맨몸 운동이면 null)
+  reps    Int? // 반복 횟수
+  rir     Int? // Reps In Reserve (PT 피드백용)
+  seconds Int? // 플랭크 등 시간 기반
+  memo    String?
+
+  @@unique([workoutLogId, setNo])
+}
+
+// ============================================================
+// SECTION 10 ─ 상담 · 인터랙션 (Interaction)
+// ============================================================
+
+model Interaction {
+  id       Int    @id @default(autoincrement())
+  memberId Int
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  /// InteractionType: COUNSEL | CHAT | PHONE | NOTE
+  type           String
+  content        String
+  /// -2 매우 부정 ~ +2 매우 긍정
+  sentimentScore Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([memberId, createdAt])
+}
+
+// ============================================================
+// SECTION 11 ─ 알림 (Notification)
+// ============================================================
+
+model Notification {
+  id       Int    @id @default(autoincrement())
+  memberId Int
+  member   Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  /// NotificationType: EXPIRY_SOON | LOW_SESSION | CHURN_RISK | BIRTHDAY | CUSTOM
+  type    String
+  /// NotificationChannel: PUSH | SMS | KAKAO | IN_APP
+  channel String
+  /// NotificationStatus: PENDING | SENT | FAILED | READ
+  status  String @default("PENDING")
+
+  title   String
+  body    String
+  payload String? // JSON (딥링크, 파라미터 등)
+
+  scheduledAt DateTime? // null = 즉시 발송
+  sentAt      DateTime?
+  readAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([memberId, status])
+  @@index([scheduledAt, status]) // 발송 배치 쿼리용
+}
+
+// ============================================================
+// SECTION 12 ─ 급여 · 세금 · 퇴직금 (Payroll / Commission / Severance)
+// ============================================================
+
+/// 연도별 공제율 마스터 (국세청 고시 기준)
+model TaxRule {
+  id   Int @id @default(autoincrement())
+  year Int @unique
+
+  nationalPension  Float @default(0.045) // 국민연금 4.5%
+  healthInsurance  Float @default(0.03545) // 건강보험 3.545%
+  longTermCareRate Float @default(0.1295) // 장기요양 (건보료 × 12.95%)
+  employmentIns    Float @default(0.009) // 고용보험 0.9%
+  freelancerTax    Float @default(0.033) // 프리랜서 원천징수 3.3%
+
+  updatedAt DateTime @updatedAt
+}
+
+model CommissionRule {
+  id      Int   @id @default(autoincrement())
+  staffId Int
+  staff   Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  /// CommissionType: PER_SESSION | PERCENT_SALES | FIXED_BONUS
+  type        String @default("PER_SESSION")
+  minSessions Int    @default(0)
+  maxSessions Int    @default(9999)
+  rate        Float
+
+  /// 기간 겹침은 애플리케이션 레이어에서 반드시 검증
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([staffId, minSessions, maxSessions])
+  @@index([staffId, effectiveFrom, effectiveTo])
+}
+
+model Payroll {
+  id          Int    @id @default(autoincrement())
+  staffId     Int
+  staff       Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  /// 포맷 강제: "YYYY-MM" (앱 레이어에서 /^\d{4}-(0[1-9]|1[0-2])$/ 검증)
+  targetMonth String
+
+  basePay        Int @default(0)
+  sessionPay     Int @default(0)
+  salesIncentive Int @default(0)
+  totalGrossPay  Int
+
+  nationalPension Int @default(0)
+  healthInsurance Int @default(0)
+  longTermCare    Int @default(0)
+  employmentIns   Int @default(0)
+  incomeTax       Int @default(0)
+  localIncomeTax  Int @default(0)
+  totalDeduction  Int @default(0)
+
+  finalNetPay      Int
+  severanceAccrual Int @default(0)
+
+  isSettled Boolean   @default(false)
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([staffId, targetMonth])
+}
+
+model SeveranceLedger {
+  staffId Int   @id
+  staff   Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  totalAccumulated Int      @default(0)
+  lastUpdated      DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// ============================================================
+// SECTION 13 ─ 통계 집계 (Stats)
+// ============================================================
+
+/// 일별 스냅샷 — 배치 잡이 자정에 생성 (절대 수동 편집 금지)
+model DailyStats {
+  id       Int      @id @default(autoincrement())
+  centerId Int
+  date     DateTime @unique
+
+  revenue     Int @default(0) // 당일 결제 합계
+  refunds     Int @default(0) // 당일 환불 합계
+  netRevenue  Int @default(0) // revenue - refunds
+  totalVisits Int @default(0) // 당일 출석 수
+  newMembers  Int @default(0) // 당일 신규 등록
+  netProfit   Int @default(0) // 순이익 추정치
+
+  /// 이 스냅샷이 언제 생성됐는지 추적
+  generatedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([centerId, date])
+}
