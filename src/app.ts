@@ -24,6 +24,8 @@ import measurementRoutes from '@/modules/measurement/measurement.router';
 import goalRoutes from '@/modules/goal/goal.router';
 import notificationRoutes from '@/modules/notification/notification.router';
 import payrollRoutes from '@/modules/payroll/payroll.router';
+import authRoutes from '@/modules/auth/auth.router';
+import authPlugin from '@/lib/auth.plugin';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -121,6 +123,11 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   // ── Routes ──────────────────────────────────────────────────
+  // Global Custom JWT Authentication Mapping
+  await app.register(authPlugin);
+
+  // 4. Router Register
+  await app.register(authRoutes, { prefix: '/api/v1/auth' });
   await app.register(memberRoutes, { prefix: '/api/v1' });
   await app.register(subscriptionRoutes, { prefix: '/api/v1' });
   await app.register(paymentRoutes, { prefix: '/api/v1' });

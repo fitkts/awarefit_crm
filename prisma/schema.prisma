@@ -211,6 +211,7 @@ model Staff {
   role         String
   phone        String?
   email        String?
+  password     String? // bcrypt hashed natively via auth module
   baseSalary   Int     @default(0)
   isFreelancer Boolean @default(true)
 

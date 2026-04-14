@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 
@@ -28,6 +29,7 @@ async function main() {
       role: 'ADMIN',
       phone: '010-1000-0001',
       email: 'admin@awarefit.kr',
+      password: bcrypt.hashSync('admin1004!', 12),
       baseSalary: 4_000_000,
       isFreelancer: false,
       hireDate: new Date('2023-01-02'),
@@ -41,6 +43,7 @@ async function main() {
       role: 'TRAINER',
       phone: '010-2000-0001',
       email: 'trainer1@awarefit.kr',
+      password: bcrypt.hashSync('trainer1234!', 12),
       baseSalary: 2_500_000,
       isFreelancer: false,
       hireDate: new Date('2023-03-15'),
@@ -54,6 +57,7 @@ async function main() {
       role: 'TRAINER',
       phone: '010-2000-0002',
       email: 'trainer2@awarefit.kr',
+      password: bcrypt.hashSync('trainer1234!', 12),
       baseSalary: 0,
       isFreelancer: true,
       hireDate: new Date('2024-01-08'),
